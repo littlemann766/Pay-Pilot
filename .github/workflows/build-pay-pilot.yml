@@ -1,1 +1,134 @@
+name: Build Pay-Pilot Release
 
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Pay-Pilot-main.zip'
+      - '.github/workflows/build-pay-pilot.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pay-pilot-build-main
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract Pay-Pilot source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f Pay-Pilot-main.zip
+          rm -rf "$RUNNER_TEMP/pay-pilot-src"
+          mkdir -p "$RUNNER_TEMP/pay-pilot-src"
+          unzip -q Pay-Pilot-main.zip -d "$RUNNER_TEMP/pay-pilot-src"
+
+          PROJECT_DIR="$(find "$RUNNER_TEMP/pay-pilot-src" -type f -path '*/app/build.gradle' -printf '%h\n' | sed 's#/app$##' | head -n 1)"
+          test -n "$PROJECT_DIR"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Found Pay-Pilot project at: $PROJECT_DIR"
+
+      - name: Read app version
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          test -f VERSION.txt
+          EXPECTED_VERSION="$(awk '/^Version:/{print $2}' VERSION.txt)"
+          test -n "$EXPECTED_VERSION"
+          echo "EXPECTED_VERSION=$EXPECTED_VERSION" >> "$GITHUB_ENV"
+          echo "Building Pay-Pilot $EXPECTED_VERSION"
+
+      - name: Verify source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          test -f app/build.gradle
+          test -f app/src/main/AndroidManifest.xml
+          test -f app/src/main/assets/index.html
+          grep -F "versionName '$EXPECTED_VERSION'" app/build.gradle
+          echo "Pay-Pilot source verified."
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Verify signing secrets
+        shell: bash
+        env:
+          KEYSTORE_HEX: ${{ secrets.MYBILLS_KEYSTORE_HEX }}
+          KEYSTORE_PASSWORD: ${{ secrets.MYBILLS_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_HEX" || { echo "::error::Missing MYBILLS_KEYSTORE_HEX"; exit 1; }
+          test -n "$KEYSTORE_PASSWORD" || { echo "::error::Missing MYBILLS_KEYSTORE_PASSWORD"; exit 1; }
+
+      - name: Restore signing key
+        shell: bash
+        env:
+          KEYSTORE_HEX: ${{ secrets.MYBILLS_KEYSTORE_HEX }}
+          KEYSTORE_PASSWORD: ${{ secrets.MYBILLS_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYSTORE_PATH="$RUNNER_TEMP/pay-pilot-release.jks"
+          printf '%s' "$KEYSTORE_HEX" | tr -d '[:space:]' | xxd -r -p > "$KEYSTORE_PATH"
+          test -s "$KEYSTORE_PATH"
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -alias mybills >/dev/null
+          echo "MYBILLS_KEYSTORE_FILE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+          echo "MYBILLS_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Build signed APK and AAB
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle clean assembleRelease bundleRelease
+
+      - name: Collect release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          AAB="$(find app/build/outputs/bundle/release -name '*.aab' | head -n 1)"
+
+          test -n "$APK"
+          test -n "$AAB"
+
+          mkdir -p "$GITHUB_WORKSPACE/release"
+          cp "$APK" "$GITHUB_WORKSPACE/release/Pay-Pilot-${EXPECTED_VERSION}.apk"
+          cp "$AAB" "$GITHUB_WORKSPACE/release/Pay-Pilot-${EXPECTED_VERSION}.aab"
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pay-Pilot-${{ env.EXPECTED_VERSION }}-signed-APK
+          path: release/Pay-Pilot-${{ env.EXPECTED_VERSION }}.apk
+          if-no-files-found: error
+
+      - name: Upload Play AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pay-Pilot-${{ env.EXPECTED_VERSION }}-Play-AAB
+          path: release/Pay-Pilot-${{ env.EXPECTED_VERSION }}.aab
+          if-no-files-found: error
