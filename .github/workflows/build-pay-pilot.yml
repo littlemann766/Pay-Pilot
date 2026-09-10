@@ -44,7 +44,6 @@ jobs:
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
-          test -f VERSION.txt
           EXPECTED_VERSION="$(awk '/^Version:/{print $2}' VERSION.txt)"
           test -n "$EXPECTED_VERSION"
           echo "EXPECTED_VERSION=$EXPECTED_VERSION" >> "$GITHUB_ENV"
@@ -58,6 +57,7 @@ jobs:
           test -f app/build.gradle
           test -f app/src/main/AndroidManifest.xml
           test -f app/src/main/assets/index.html
+          grep -F "applicationId 'com.paypilot.app'" app/build.gradle
           grep -F "versionName '$EXPECTED_VERSION'" app/build.gradle
           echo "Pay-Pilot source verified."
 
@@ -75,26 +75,27 @@ jobs:
       - name: Verify signing secrets
         shell: bash
         env:
-          KEYSTORE_HEX: ${{ secrets.MYBILLS_KEYSTORE_HEX }}
-          KEYSTORE_PASSWORD: ${{ secrets.MYBILLS_KEYSTORE_PASSWORD }}
+          KEYSTORE_HEX: ${{ secrets.PAYPILOT_KEYSTORE_HEX }}
+          KEYSTORE_PASSWORD: ${{ secrets.PAYPILOT_KEYSTORE_PASSWORD }}
         run: |
           set -euo pipefail
-          test -n "$KEYSTORE_HEX" || { echo "::error::Missing MYBILLS_KEYSTORE_HEX"; exit 1; }
-          test -n "$KEYSTORE_PASSWORD" || { echo "::error::Missing MYBILLS_KEYSTORE_PASSWORD"; exit 1; }
+          test -n "$KEYSTORE_HEX" || { echo "::error::Missing PAYPILOT_KEYSTORE_HEX"; exit 1; }
+          test -n "$KEYSTORE_PASSWORD" || { echo "::error::Missing PAYPILOT_KEYSTORE_PASSWORD"; exit 1; }
 
       - name: Restore signing key
         shell: bash
         env:
-          KEYSTORE_HEX: ${{ secrets.MYBILLS_KEYSTORE_HEX }}
-          KEYSTORE_PASSWORD: ${{ secrets.MYBILLS_KEYSTORE_PASSWORD }}
+          KEYSTORE_HEX: ${{ secrets.PAYPILOT_KEYSTORE_HEX }}
+          KEYSTORE_PASSWORD: ${{ secrets.PAYPILOT_KEYSTORE_PASSWORD }}
         run: |
           set -euo pipefail
           KEYSTORE_PATH="$RUNNER_TEMP/pay-pilot-release.jks"
           printf '%s' "$KEYSTORE_HEX" | tr -d '[:space:]' | xxd -r -p > "$KEYSTORE_PATH"
           test -s "$KEYSTORE_PATH"
-          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -alias mybills >/dev/null
-          echo "MYBILLS_KEYSTORE_FILE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
-          echo "MYBILLS_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          keytool -list -keystore "$KEYSTORE_PATH" -storepass "$KEYSTORE_PASSWORD" -alias paypilot >/dev/null
+
+          echo "PAYPILOT_KEYSTORE_FILE=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+          echo "PAYPILOT_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
 
       - name: Build signed APK and AAB
         shell: bash
