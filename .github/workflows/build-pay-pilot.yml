@@ -29,39 +29,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          if [ -f "$GITHUB_WORKSPACE/app/build.gradle" ]; then
-            PROJECT_DIR="$GITHUB_WORKSPACE"
-            echo "Using Pay-Pilot source from repository root."
-
-          elif [ -f "$GITHUB_WORKSPACE/Pay-Pilot-main.zip" ]; then
-            rm -rf "$RUNNER_TEMP/pay-pilot-src"
-            mkdir -p "$RUNNER_TEMP/pay-pilot-src"
-            unzip -q "$GITHUB_WORKSPACE/Pay-Pilot-main.zip" -d "$RUNNER_TEMP/pay-pilot-src"
-
-            APP_GRADLE="$(find "$RUNNER_TEMP/pay-pilot-src" -type f -path '*/app/build.gradle' -print -quit)"
-            if [ -z "$APP_GRADLE" ]; then
-              echo "ERROR: app/build.gradle was not found inside Pay-Pilot-main.zip"
-              exit 1
-            fi
-            PROJECT_DIR="$(dirname "$(dirname "$APP_GRADLE")")"
-            echo "Using Pay-Pilot source from Pay-Pilot-main.zip."
-
-          else
-            APP_GRADLE="$(find "$GITHUB_WORKSPACE" -type f -path '*/app/build.gradle' -not -path '*/.gradle/*' -not -path '*/build/*' -print -quit)"
-            if [ -z "$APP_GRADLE" ]; then
-              echo "ERROR: Could not locate Pay-Pilot app/build.gradle"
-              exit 1
-            fi
-            PROJECT_DIR="$(dirname "$(dirname "$APP_GRADLE")")"
-            echo "Using Pay-Pilot source discovered in repository."
-          fi
-
+          PROJECT_DIR="$GITHUB_WORKSPACE"
           test -f "$PROJECT_DIR/app/build.gradle"
           test -f "$PROJECT_DIR/settings.gradle"
           test -f "$PROJECT_DIR/VERSION.txt"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Found Pay-Pilot project at: $PROJECT_DIR"
+          echo "Found Pay-Pilot project at repository root: $PROJECT_DIR"
 
       - name: Read app version
         shell: bash
@@ -134,17 +107,15 @@ jobs:
           echo "Starting release build without Gradle clean..."
           gradle --no-daemon --stacktrace :app:assembleRelease :app:bundleRelease
 
-      - name: Verify built version
+      - name: Verify built version and packaged web assets
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
           test -f app/build/outputs/apk/release/app-release.apk
           test -f app/build/outputs/bundle/release/app-release.aab
-          if [ -f tools/verify-apk-assets.py ]; then
-            python3 tools/verify-apk-assets.py app/build/outputs/apk/release/app-release.apk
-          fi
-          echo "Built Pay-Pilot $EXPECTED_VERSION successfully."
+          python3 tools/verify-apk-assets.py app/build/outputs/apk/release/app-release.apk
+          echo "Built Pay-Pilot $EXPECTED_VERSION successfully with current web assets."
 
       - name: Stage release artifacts
         shell: bash
