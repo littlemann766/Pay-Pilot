@@ -3,9 +3,12 @@ name: Build Pay-Pilot Release
 on:
   workflow_dispatch:
   push:
-    paths:
-      - 'pay-pilot-main.zip'
-      - '.github/workflows/build.yml'
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.zip'
+      - '**/*.apk'
+      - '**/*.aab'
 
 permissions:
   contents: read
@@ -18,17 +21,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract Pay-Pilot source
+      - name: Locate Pay-Pilot source
         shell: bash
         run: |
           set -euo pipefail
-          test -f pay-pilot-main.zip
-          rm -rf "$RUNNER_TEMP/pay-pilot-src"
-          mkdir -p "$RUNNER_TEMP/pay-pilot-src"
-          unzip -q pay-pilot-main.zip -d "$RUNNER_TEMP/pay-pilot-src"
 
-          PROJECT_DIR="$(find "$RUNNER_TEMP/pay-pilot-src" -type f -path '*/app/build.gradle' -printf '%h\n' | sed 's#/app$##' | head -n 1)"
-          test -n "$PROJECT_DIR"
+          if [ -f "app/build.gradle" ]; then
+            PROJECT_DIR="$GITHUB_WORKSPACE"
+          else
+            APP_GRADLE="$(find "$GITHUB_WORKSPACE" -type f -path '*/app/build.gradle' -not -path '*/.gradle/*' -not -path '*/build/*' -print -quit)"
+            test -n "$APP_GRADLE"
+            PROJECT_DIR="$(dirname "$(dirname "$APP_GRADLE")")"
+          fi
+
+          test -f "$PROJECT_DIR/app/build.gradle"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Found Pay-Pilot project at: $PROJECT_DIR"
 
