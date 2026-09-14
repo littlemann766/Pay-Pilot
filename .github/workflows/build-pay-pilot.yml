@@ -29,12 +29,81 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          PROJECT_DIR="$GITHUB_WORKSPACE"
+
+          find_project() {
+            local root="$1"
+            local app_gradle project
+
+            while IFS= read -r app_gradle; do
+              project="$(dirname "$(dirname "$app_gradle")")"
+              if [ -f "$project/settings.gradle" ] && [ -f "$project/VERSION.txt" ]; then
+                printf '%s\n' "$project"
+                return 0
+              fi
+            done < <(find "$root" -type f -path '*/app/build.gradle' \
+              -not -path '*/.git/*' \
+              -not -path '*/.gradle/*' \
+              -not -path '*/build/*' \
+              -print 2>/dev/null)
+
+            return 1
+          }
+
+          PROJECT_DIR=""
+
+          # 1) Normal repo layout, including a Pay-Pilot-main/ subfolder.
+          PROJECT_DIR="$(find_project "$GITHUB_WORKSPACE" || true)"
+
+          # 2) If GitHub contains a ZIP instead of extracted source, unpack it.
+          #    Repeat a few levels so an accidental ZIP-inside-ZIP still works.
+          if [ -z "$PROJECT_DIR" ]; then
+            SEARCH_DIR="$RUNNER_TEMP/pay-pilot-source-search"
+            rm -rf "$SEARCH_DIR"
+            mkdir -p "$SEARCH_DIR"
+
+            mapfile -t ZIP_QUEUE < <(find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -iname '*.zip' -print)
+            depth=0
+
+            while [ ${#ZIP_QUEUE[@]} -gt 0 ] && [ "$depth" -lt 4 ] && [ -z "$PROJECT_DIR" ]; do
+              NEXT_QUEUE=()
+              index=0
+
+              for zip_file in "${ZIP_QUEUE[@]}"; do
+                index=$((index + 1))
+                out_dir="$SEARCH_DIR/depth-$depth/item-$index"
+                mkdir -p "$out_dir"
+
+                echo "Inspecting ZIP: $zip_file"
+                if unzip -q "$zip_file" -d "$out_dir"; then
+                  PROJECT_DIR="$(find_project "$out_dir" || true)"
+                  if [ -n "$PROJECT_DIR" ]; then
+                    break
+                  fi
+
+                  while IFS= read -r nested_zip; do
+                    NEXT_QUEUE+=("$nested_zip")
+                  done < <(find "$out_dir" -type f -iname '*.zip' -print 2>/dev/null)
+                fi
+              done
+
+              ZIP_QUEUE=("${NEXT_QUEUE[@]}")
+              depth=$((depth + 1))
+            done
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Could not locate a Pay-Pilot Android project."
+            echo "Expected app/build.gradle, settings.gradle, and VERSION.txt either in the repo or inside a ZIP."
+            echo "Repository contents:"
+            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -print | sort | head -200
+            exit 1
+          fi
+
           test -f "$PROJECT_DIR/app/build.gradle"
           test -f "$PROJECT_DIR/settings.gradle"
           test -f "$PROJECT_DIR/VERSION.txt"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Found Pay-Pilot project at repository root: $PROJECT_DIR"
+          echo "Found Pay-Pilot project at: $PROJECT_DIR"
 
       - name: Read app version
         shell: bash
