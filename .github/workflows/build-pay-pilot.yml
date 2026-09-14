@@ -12,9 +12,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: pay-pilot-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -35,18 +40,25 @@ jobs:
             unzip -q "$GITHUB_WORKSPACE/Pay-Pilot-main.zip" -d "$RUNNER_TEMP/pay-pilot-src"
 
             APP_GRADLE="$(find "$RUNNER_TEMP/pay-pilot-src" -type f -path '*/app/build.gradle' -print -quit)"
-            test -n "$APP_GRADLE"
+            if [ -z "$APP_GRADLE" ]; then
+              echo "ERROR: app/build.gradle was not found inside Pay-Pilot-main.zip"
+              exit 1
+            fi
             PROJECT_DIR="$(dirname "$(dirname "$APP_GRADLE")")"
             echo "Using Pay-Pilot source from Pay-Pilot-main.zip."
 
           else
             APP_GRADLE="$(find "$GITHUB_WORKSPACE" -type f -path '*/app/build.gradle' -not -path '*/.gradle/*' -not -path '*/build/*' -print -quit)"
-            test -n "$APP_GRADLE"
+            if [ -z "$APP_GRADLE" ]; then
+              echo "ERROR: Could not locate Pay-Pilot app/build.gradle"
+              exit 1
+            fi
             PROJECT_DIR="$(dirname "$(dirname "$APP_GRADLE")")"
             echo "Using Pay-Pilot source discovered in repository."
           fi
 
           test -f "$PROJECT_DIR/app/build.gradle"
+          test -f "$PROJECT_DIR/settings.gradle"
           test -f "$PROJECT_DIR/VERSION.txt"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Found Pay-Pilot project at: $PROJECT_DIR"
@@ -88,6 +100,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
+          cache-cleanup: on-success
 
       - name: Verify signing secrets
         shell: bash
@@ -118,7 +131,8 @@ jobs:
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
-          gradle --no-daemon :app:clean :app:assembleRelease :app:bundleRelease
+          echo "Starting release build without Gradle clean..."
+          gradle --no-daemon --stacktrace :app:assembleRelease :app:bundleRelease
 
       - name: Verify built version
         shell: bash
@@ -151,3 +165,4 @@ jobs:
             ${{ runner.temp }}/pay-pilot-release/Pay-Pilot-${{ env.EXPECTED_VERSION }}.aab
             ${{ runner.temp }}/pay-pilot-release/VERSION.txt
           if-no-files-found: error
+          retention-days: 14
