@@ -1,0 +1,208 @@
+name: Build PayAviator Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.apk'
+      - '**/*.aab'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: payaviator-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate PayAviator source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find_project() {
+            local root="$1"
+            local app_gradle project
+
+            while IFS= read -r app_gradle; do
+              project="$(dirname "$(dirname "$app_gradle")")"
+              if [ -f "$project/settings.gradle" ] && [ -f "$project/VERSION.txt" ]; then
+                printf '%s\n' "$project"
+                return 0
+              fi
+            done < <(find "$root" -type f -path '*/app/build.gradle' \
+              -not -path '*/.git/*' \
+              -not -path '*/.gradle/*' \
+              -not -path '*/build/*' \
+              -print 2>/dev/null)
+
+            return 1
+          }
+
+          PROJECT_DIR=""
+
+          # 1) Normal repo layout, including a PayAviator project subfolder.
+          PROJECT_DIR="$(find_project "$GITHUB_WORKSPACE" || true)"
+
+          # 2) If GitHub contains a ZIP instead of extracted source, unpack it.
+          #    Repeat a few levels so an accidental ZIP-inside-ZIP still works.
+          if [ -z "$PROJECT_DIR" ]; then
+            SEARCH_DIR="$RUNNER_TEMP/payaviator-source-search"
+            rm -rf "$SEARCH_DIR"
+            mkdir -p "$SEARCH_DIR"
+
+            mapfile -t ZIP_QUEUE < <(find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -iname '*.zip' -print)
+            depth=0
+
+            while [ ${#ZIP_QUEUE[@]} -gt 0 ] && [ "$depth" -lt 4 ] && [ -z "$PROJECT_DIR" ]; do
+              NEXT_QUEUE=()
+              index=0
+
+              for zip_file in "${ZIP_QUEUE[@]}"; do
+                index=$((index + 1))
+                out_dir="$SEARCH_DIR/depth-$depth/item-$index"
+                mkdir -p "$out_dir"
+
+                echo "Inspecting ZIP: $zip_file"
+                if unzip -q "$zip_file" -d "$out_dir"; then
+                  PROJECT_DIR="$(find_project "$out_dir" || true)"
+                  if [ -n "$PROJECT_DIR" ]; then
+                    break
+                  fi
+
+                  while IFS= read -r nested_zip; do
+                    NEXT_QUEUE+=("$nested_zip")
+                  done < <(find "$out_dir" -type f -iname '*.zip' -print 2>/dev/null)
+                fi
+              done
+
+              ZIP_QUEUE=("${NEXT_QUEUE[@]}")
+              depth=$((depth + 1))
+            done
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Could not locate a PayAviator Android project."
+            echo "Expected app/build.gradle, settings.gradle, and VERSION.txt either in the repo or inside a ZIP."
+            echo "Repository contents:"
+            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -print | sort | head -200
+            exit 1
+          fi
+
+          test -f "$PROJECT_DIR/app/build.gradle"
+          test -f "$PROJECT_DIR/settings.gradle"
+          test -f "$PROJECT_DIR/VERSION.txt"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Found PayAviator project at: $PROJECT_DIR"
+
+      - name: Read app version
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          EXPECTED_VERSION="$(sed -E 's/^[Vv]ersion:[[:space:]]*//' VERSION.txt | tr -d '\r' | xargs)"
+          test -n "$EXPECTED_VERSION"
+          echo "$EXPECTED_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
+          echo "EXPECTED_VERSION=$EXPECTED_VERSION" >> "$GITHUB_ENV"
+          echo "Building PayAviator $EXPECTED_VERSION"
+
+      - name: Verify source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          test -f app/build.gradle
+          test -f app/src/main/AndroidManifest.xml
+          test -f index.html
+          grep -F "applicationId 'com.payaviator.app'" app/build.gradle
+          grep -F "rootProject.file('VERSION.txt')" app/build.gradle
+          grep -F "versionName payAviatorVersion" app/build.gradle
+          grep -F "versionCode payAviatorVersionCode" app/build.gradle
+          grep -F "syncPayAviatorWebAssets" app/build.gradle
+          python3 tools/verify-foundation.py
+          echo "PayAviator source verified for $EXPECTED_VERSION."
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+          cache-cleanup: on-success
+
+      - name: Verify signing secrets
+        shell: bash
+        env:
+          PAYPILOT_KEYSTORE_HEX: ${{ secrets.PAYPILOT_KEYSTORE_HEX }}
+          PAYPILOT_KEYSTORE_PASSWORD: ${{ secrets.PAYPILOT_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$PAYPILOT_KEYSTORE_HEX"
+          test -n "$PAYPILOT_KEYSTORE_PASSWORD"
+          echo "Signing secrets are present."
+
+      - name: Restore signing key
+        shell: bash
+        env:
+          PAYPILOT_KEYSTORE_HEX: ${{ secrets.PAYPILOT_KEYSTORE_HEX }}
+        run: |
+          set -euo pipefail
+          KEYSTORE_FILE="$RUNNER_TEMP/PayAviator-release.jks"
+          printf '%s' "$PAYPILOT_KEYSTORE_HEX" | tr -d '[:space:]' | xxd -r -p > "$KEYSTORE_FILE"
+          test -s "$KEYSTORE_FILE"
+          echo "PAYPILOT_KEYSTORE_FILE=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+
+      - name: Build signed APK and AAB
+        shell: bash
+        env:
+          PAYPILOT_KEYSTORE_PASSWORD: ${{ secrets.PAYPILOT_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          echo "Starting release build without Gradle clean..."
+          gradle --no-daemon --stacktrace :app:assembleRelease :app:bundleRelease
+
+      - name: Verify built version and packaged web assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          test -f app/build/outputs/apk/release/app-release.apk
+          test -f app/build/outputs/bundle/release/app-release.aab
+          python3 tools/verify-apk-assets.py app/build/outputs/apk/release/app-release.apk
+          echo "Built PayAviator $EXPECTED_VERSION successfully with current web assets."
+
+      - name: Stage release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/payaviator-release"
+          mkdir -p "$RUNNER_TEMP/payaviator-release"
+          cp "$PROJECT_DIR/app/build/outputs/apk/release/app-release.apk" "$RUNNER_TEMP/payaviator-release/PayAviator-$EXPECTED_VERSION.apk"
+          cp "$PROJECT_DIR/app/build/outputs/bundle/release/app-release.aab" "$RUNNER_TEMP/payaviator-release/PayAviator-$EXPECTED_VERSION.aab"
+          cp "$PROJECT_DIR/VERSION.txt" "$RUNNER_TEMP/payaviator-release/VERSION.txt"
+
+      - name: Upload PayAviator release
+        uses: actions/upload-artifact@v4
+        with:
+          name: PayAviator-${{ env.EXPECTED_VERSION }}
+          path: |
+            ${{ runner.temp }}/payaviator-release/PayAviator-${{ env.EXPECTED_VERSION }}.apk
+            ${{ runner.temp }}/payaviator-release/PayAviator-${{ env.EXPECTED_VERSION }}.aab
+            ${{ runner.temp }}/payaviator-release/VERSION.txt
+          if-no-files-found: error
+          retention-days: 14
