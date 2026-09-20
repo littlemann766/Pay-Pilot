@@ -159,17 +159,32 @@ jobs:
         shell: bash
         env:
           PAYPILOT_KEYSTORE_HEX: ${{ secrets.PAYPILOT_KEYSTORE_HEX }}
+          PAYPILOT_KEYSTORE_PASSWORD: ${{ secrets.PAYPILOT_KEYSTORE_PASSWORD }}
         run: |
           set -euo pipefail
           KEYSTORE_FILE="$RUNNER_TEMP/PayAviator-release.jks"
           printf '%s' "$PAYPILOT_KEYSTORE_HEX" | tr -d '[:space:]' | xxd -r -p > "$KEYSTORE_FILE"
           test -s "$KEYSTORE_FILE"
-          echo "PAYPILOT_KEYSTORE_FILE=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+
+          # The existing signing key is preserved. Rename its alias only in this
+          # temporary runner copy so the clean PayAviator Gradle config can use it.
+          if ! keytool -list -keystore "$KEYSTORE_FILE" -storepass "$PAYPILOT_KEYSTORE_PASSWORD" -alias payaviator >/dev/null 2>&1; then
+            OLD_ALIAS="$(keytool -list -keystore "$KEYSTORE_FILE" -storepass "$PAYPILOT_KEYSTORE_PASSWORD" 2>/dev/null | awk -F, '/PrivateKeyEntry/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1; exit}')"
+            test -n "$OLD_ALIAS"
+            keytool -changealias \
+              -keystore "$KEYSTORE_FILE" \
+              -storepass "$PAYPILOT_KEYSTORE_PASSWORD" \
+              -keypass "$PAYPILOT_KEYSTORE_PASSWORD" \
+              -alias "$OLD_ALIAS" \
+              -destalias payaviator
+          fi
+
+          echo "PAYAVIATOR_KEYSTORE_FILE=$KEYSTORE_FILE" >> "$GITHUB_ENV"
 
       - name: Build signed APK and AAB
         shell: bash
         env:
-          PAYPILOT_KEYSTORE_PASSWORD: ${{ secrets.PAYPILOT_KEYSTORE_PASSWORD }}
+          PAYAVIATOR_KEYSTORE_PASSWORD: ${{ secrets.PAYPILOT_KEYSTORE_PASSWORD }}
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
